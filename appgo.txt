@@ -1,0 +1,1130 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/dgrijalva/jwt-go"
+	storage "github.com/supabase-community/storage-go"
+	"github.com/supabase-community/supabase-go"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// App struct
+type App struct {
+	ctx             context.Context
+	installedSkins  map[string]SkinInfo
+	modToolsProcess *os.Process
+	installedPath   string
+}
+
+// SkinInfo representa la información de una skin instalada
+type SkinInfo struct {
+	SkinId     string `json:"skinId,string"`
+	FileName   string `json:"fileName,string"`
+	ProcessId  string `json:"processId,string"`
+	ChromaName string `json:"chromaName"`
+	SkinName   string `json:"skinName"`
+	ImageUrl   string `json:"imageUrl"`
+}
+
+// Constantes de rutas
+const (
+	BasePath          = "resources" // Ajustar según empaquetado
+	InstalledPath     = BasePath + "/LoLModInstaller/installed"
+	ProfilesPath      = BasePath + "/LoLModInstaller/profiles/Default"
+	ModToolsPath      = BasePath + "/cslol-tools/mod-tools.exe"
+	ModStatusPath     = BasePath + "/LoLModInstaller/mod-status.json"
+	InstalledJsonPath = InstalledPath + "/installed.json"
+	GamePath          = "C:\\Riot Games\\League of Legends\\Game"
+)
+
+// Variables de Supabase y JWT (ajusta según tu configuración)
+const (
+	SupabaseURL = "https://odlqwkgewzxxmbsqutja.supabase.co"
+	SupabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9kbHF3a2dld3p4eG1ic3F1dGphIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzQyMTM2NzcsImV4cCI6MjA0OTc4OTY3N30.qka6a71bavDeUQgy_BKoVavaClRQa_gT36Au7oO9AF0"
+	JWTSecret   = "bian1212"
+)
+
+var supabaseClient *supabase.Client
+
+// NewApp crea una nueva instancia de la aplicación
+func NewApp() *App {
+	return &App{
+		installedSkins: make(map[string]SkinInfo),
+		installedPath:  InstalledPath,
+	}
+}
+
+// startup se llama al iniciar la aplicación
+func (a *App) startup(ctx context.Context) {
+	a.ctx = ctx
+	var err error
+	supabaseClient, err = supabase.NewClient(SupabaseURL, SupabaseKey, nil)
+	if err != nil {
+		panic(err) // O maneja el error como prefieras
+	}
+
+	a.EnsureDirectories()
+	a.LoadInstalledSkins()
+	a.CleanupTempFiles()
+}
+
+// Greet ejemplo básico
+func (a *App) Greet(name string) string {
+	return fmt.Sprintf("Hello %s, It's show time!", name)
+}
+
+// EnsureDirectories crea los directorios necesarios
+func (a *App) EnsureDirectories() error {
+	paths := []string{a.installedPath, ProfilesPath, filepath.Dir(ModStatusPath)}
+	for _, p := range paths {
+		if err := os.MkdirAll(p, 0755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LoadInstalledSkins carga las skins instaladas desde installed.json
+func (a *App) LoadInstalledSkins() error {
+	installedPath := filepath.Join(a.installedPath, "installed.json")
+	data, err := os.ReadFile(installedPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Si el archivo no existe, inicializar un mapa vacío
+			a.installedSkins = make(map[string]SkinInfo)
+			return nil
+		}
+		return fmt.Errorf("error reading installed.json: %v", err)
+	}
+
+	var installedSkinsArray []map[string]interface{}
+	if err := json.Unmarshal(data, &installedSkinsArray); err != nil {
+		return fmt.Errorf("error parsing installed.json: %v", err)
+	}
+
+	// Convertir el array a un mapa
+	a.installedSkins = make(map[string]SkinInfo)
+	for _, skinData := range installedSkinsArray {
+		championId := skinData["championId"].(string)
+		if championId == "" {
+			continue
+		}
+
+		a.installedSkins[championId] = SkinInfo{
+			SkinId:     skinData["skinId"].(string),
+			FileName:   skinData["fileName"].(string),
+			ProcessId:  skinData["processId"].(string),
+			ChromaName: skinData["chromaName"].(string),
+			SkinName:   skinData["skinName"].(string),
+			ImageUrl:   skinData["imageUrl"].(string),
+		}
+	}
+
+	return nil
+}
+
+// SaveInstalledSkins guarda las skins instaladas en installed.json
+func (a *App) SaveInstalledSkins() error {
+	// Convertir el mapa a un array
+	var installedSkinsArray []map[string]interface{}
+	for championId, skin := range a.installedSkins {
+		if championId == "" {
+			continue
+		}
+
+		installedSkinsArray = append(installedSkinsArray, map[string]interface{}{
+			"championId": championId,
+			"skinId":     skin.SkinId,
+			"fileName":   skin.FileName,
+			"processId":  skin.ProcessId,
+			"chromaName": skin.ChromaName,
+			"skinName":   skin.SkinName,
+			"imageUrl":   skin.ImageUrl,
+		})
+	}
+
+	// Convertir a JSON
+	data, err := json.MarshalIndent(installedSkinsArray, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error marshaling installed skins: %v", err)
+	}
+
+	// Guardar en el archivo
+	installedPath := filepath.Join(a.installedPath, "installed.json")
+	if err := os.WriteFile(installedPath, data, 0644); err != nil {
+		return fmt.Errorf("error writing installed.json: %v", err)
+	}
+
+	return nil
+}
+
+// KillModTools termina el proceso de mod-tools.exe
+// KillModTools termina el proceso de mod-tools.exe
+// KillModTools termina el proceso de mod-tools.exe y sus hijos
+func (a *App) KillModTools() (bool, error) {
+	if a.modToolsProcess == nil {
+		return true, nil
+	}
+
+	pid := a.modToolsProcess.Pid
+
+	// Intentar terminar todo el árbol de procesos (/T)
+	cmd := exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", pid))
+	if err := cmd.Run(); err != nil {
+		runtime.LogWarning(a.ctx, fmt.Sprintf("Falló taskkill con PID %d, intentando por nombre", pid))
+
+		// Terminar todos los procesos por nombre
+		cmd = exec.Command("taskkill", "/F", "/IM", "mod-tools.exe")
+		if err := cmd.Run(); err != nil {
+			runtime.LogError(a.ctx, fmt.Sprintf("Error final: %v", err))
+			a.modToolsProcess = nil // Limpiar referencia aunque falle
+			return false, fmt.Errorf("no se pudo terminar mod-tools: %v", err)
+		}
+	}
+
+	// Limpiar referencia siempre
+	a.modToolsProcess = nil
+	return true, nil
+}
+
+// RunModToolCommand ejecuta comandos de mod-tools
+// RunModToolCommand ejecuta comandos de mod-tools
+
+// RunOverlay ejecuta mod-tools.exe en segundo plano y captura su salida en archivos de log
+func (a *App) RunOverlay(args []string) map[string]interface{} {
+	logDir := filepath.Join(BasePath, "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Error creating log directory: %v", err),
+		}
+	}
+
+	timestamp := time.Now().Format("20060102-150405")
+	stdoutLogPath := filepath.Join(logDir, fmt.Sprintf("overlay-stdout-%s.log", timestamp))
+	stderrLogPath := filepath.Join(logDir, fmt.Sprintf("overlay-stderr-%s.log", timestamp))
+
+	cmd := exec.Command(ModToolsPath, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+		HideWindow:    true,
+	}
+
+	stdoutFile, err := os.Create(stdoutLogPath)
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Error creating stdout log file: %v", err),
+		}
+	}
+	defer stdoutFile.Close()
+
+	stderrFile, err := os.Create(stderrLogPath)
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Error creating stderr log file: %v", err),
+		}
+	}
+	defer stderrFile.Close()
+
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+
+	if err := cmd.Start(); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Error starting mod-tools: %v", err),
+		}
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	process, err := os.FindProcess(cmd.Process.Pid)
+	if err != nil {
+		runtime.LogError(a.ctx, fmt.Sprintf("Process terminated immediately: %v", err))
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Process terminated unexpectedly after starting",
+		}
+	}
+	a.modToolsProcess = process
+
+	runtime.EventsEmit(a.ctx, "overlay-started", map[string]interface{}{
+		"pid":         cmd.Process.Pid,
+		"stdoutLog":   stdoutLogPath,
+		"stderrLog":   stderrLogPath,
+		"startedAt":   time.Now().Format(time.RFC3339),
+		"commandArgs": args,
+	})
+
+	go a.monitorOverlayProcess(cmd, stdoutLogPath, stderrLogPath)
+
+	return map[string]interface{}{
+		"success":     true,
+		"pid":         cmd.Process.Pid,
+		"stdoutLog":   stdoutLogPath,
+		"stderrLog":   stderrLogPath,
+		"commandArgs": args,
+	}
+}
+
+// monitorOverlayProcess monitors the mod-tools process and sends log updates
+func (a *App) monitorOverlayProcess(cmd *exec.Cmd, stdoutLogPath, stderrLogPath string) {
+	var lastStdoutPos, lastStderrPos int64
+	ticker := time.NewTicker(2 * time.Second) // Reduced interval for more responsive updates
+	defer ticker.Stop()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	for {
+		select {
+		case err := <-done:
+			stopData := map[string]interface{}{
+				"pid":       cmd.Process.Pid,
+				"stoppedAt": time.Now().Format(time.RFC3339),
+			}
+			if err != nil {
+				stopData["exitError"] = true
+				stopData["errorMsg"] = err.Error()
+			} else {
+				stopData["exitError"] = false
+			}
+			runtime.EventsEmit(a.ctx, "overlay-stopped", stopData)
+			a.sendLogUpdates(stdoutLogPath, stderrLogPath, &lastStdoutPos, &lastStderrPos)
+			a.modToolsProcess = nil
+			return
+		case <-ticker.C:
+			if a.modToolsProcess != nil {
+				if err := a.modToolsProcess.Signal(syscall.Signal(0)); err != nil {
+					runtime.LogWarning(a.ctx, "Process not responding, assuming terminated")
+					runtime.EventsEmit(a.ctx, "overlay-stopped", map[string]interface{}{
+						"pid":       cmd.Process.Pid,
+						"exitError": true,
+						"errorMsg":  "Process not responding",
+						"stoppedAt": time.Now().Format(time.RFC3339),
+					})
+					a.modToolsProcess = nil
+					return
+				}
+			}
+			a.sendLogUpdates(stdoutLogPath, stderrLogPath, &lastStdoutPos, &lastStderrPos)
+		}
+	}
+}
+
+// sendLogUpdates reads logs and sends updates to the frontend
+func (a *App) sendLogUpdates(stdoutLogPath, stderrLogPath string, lastStdoutPos, lastStderrPos *int64) {
+	stdoutUpdates, newStdoutPos, err := a.readLogUpdates(stdoutLogPath, *lastStdoutPos)
+	if err == nil && len(stdoutUpdates) > 0 {
+		*lastStdoutPos = newStdoutPos
+		runtime.EventsEmit(a.ctx, "overlay-stdout-update", map[string]interface{}{
+			"content": stdoutUpdates,
+			"time":    time.Now().Format(time.RFC3339),
+		})
+	}
+
+	stderrUpdates, newStderrPos, err := a.readLogUpdates(stderrLogPath, *lastStderrPos)
+	if err == nil && len(stderrUpdates) > 0 {
+		*lastStderrPos = newStderrPos
+		runtime.EventsEmit(a.ctx, "overlay-stderr-update", map[string]interface{}{
+			"content": stderrUpdates,
+			"time":    time.Now().Format(time.RFC3339),
+		})
+	}
+}
+
+// readLogUpdates reads new lines from a log file starting from a specific position
+func (a *App) readLogUpdates(logPath string, lastPos int64) (string, int64, error) {
+	file, err := os.Open(logPath)
+	if err != nil {
+		return "", lastPos, err
+	}
+	defer file.Close()
+
+	// Get current file size
+	stat, err := file.Stat()
+	if err != nil {
+		return "", lastPos, err
+	}
+
+	// If no changes, return
+	if stat.Size() <= lastPos {
+		return "", lastPos, nil
+	}
+
+	// Move to last read position
+	if _, err := file.Seek(lastPos, 0); err != nil {
+		return "", lastPos, err
+	}
+
+	// Read new lines
+	buf := make([]byte, stat.Size()-lastPos)
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		return "", lastPos, err
+	}
+
+	return string(buf[:n]), lastPos + int64(n), nil
+}
+
+// StartRunOverlay starts the mod-tools.exe process with appropriate arguments
+func (a *App) StartRunOverlay() map[string]interface{} {
+	if a.modToolsProcess != nil {
+		cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", a.modToolsProcess.Pid), "/NH")
+		output, err := cmd.Output()
+		if err == nil && strings.Contains(string(output), fmt.Sprintf("%d", a.modToolsProcess.Pid)) {
+			return map[string]interface{}{
+				"success": true,
+				"message": "Overlay is already running",
+				"pid":     a.modToolsProcess.Pid,
+			}
+		}
+		a.modToolsProcess = nil
+	}
+
+	args := []string{
+		"runoverlay",
+		ProfilesPath,
+		"--game:" + GamePath,
+		"configless",
+	}
+	if modsArg := strings.Join(getInstalledFiles(a.installedSkins), "/"); modsArg != "" {
+		args = append(args, "--mods:"+modsArg)
+	}
+
+	return a.RunOverlay(args)
+}
+
+// StopRunOverlay stops the mod-tools.exe process if running
+func (a *App) StopRunOverlay() map[string]interface{} {
+	if a.modToolsProcess == nil {
+		return map[string]interface{}{
+			"success": true,
+			"message": "No overlay process is running",
+		}
+	}
+
+	pid := a.modToolsProcess.Pid
+	runtime.LogInfo(a.ctx, fmt.Sprintf("Attempting to stop process with PID %d", pid))
+
+	cmd := exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", pid))
+	if err := cmd.Run(); err != nil {
+		runtime.LogWarning(a.ctx, fmt.Sprintf("taskkill failed with PID %d: %v", pid, err))
+		cmd = exec.Command("taskkill", "/F", "/IM", "mod-tools.exe")
+		if err := cmd.Run(); err != nil {
+			runtime.LogError(a.ctx, fmt.Sprintf("Failed to terminate mod-tools.exe: %v", err))
+			a.modToolsProcess = nil
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Could not terminate process: %v", err),
+			}
+		}
+	}
+
+	runtime.EventsEmit(a.ctx, "overlay-stopped", map[string]interface{}{
+		"pid":       pid,
+		"stoppedAt": time.Now().Format(time.RFC3339),
+		"exitError": false,
+	})
+	a.modToolsProcess = nil
+
+	return map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Process with PID %d stopped successfully", pid),
+	}
+}
+
+func (a *App) RunModToolCommand(command string, args []string) (map[string]interface{}, error) {
+	cmd := exec.Command(ModToolsPath, append([]string{command}, args...)...)
+
+	// Configurar para ejecutar en segundo plano sin ventana (solo Windows)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x08000000, // CREATE_NO_WINDOW
+		HideWindow:    true,
+	}
+
+	// Redirigir stdout y stderr a archivos de log
+	stdoutFile, err := os.Create("stdout.log")
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}, err
+	}
+	defer stdoutFile.Close()
+
+	stderrFile, err := os.Create("stderr.log")
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}, err
+	}
+	defer stderrFile.Close()
+
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+
+	// Iniciar el proceso sin esperar
+	if err := cmd.Start(); err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}, err
+	}
+
+	// Guardar referencia al proceso SOLO para runoverlay
+	if command == "runoverlay" {
+		// Esperar 1s y verificar si el proceso sigue vivo
+		time.Sleep(1 * time.Second)
+		if process, err := os.FindProcess(cmd.Process.Pid); err == nil {
+			a.modToolsProcess = process
+		} else {
+			runtime.LogWarning(a.ctx, "El proceso terminó inmediatamente después de iniciar")
+		}
+	}
+
+	// Goroutine para manejar la finalización (solo para comandos no persistentes)
+	if command != "runoverlay" {
+		go func() {
+			err := cmd.Wait()
+			if err != nil {
+				runtime.LogError(a.ctx, fmt.Sprintf("Proceso %s terminó con error: %v", command, err))
+			}
+		}()
+	}
+
+	// Respuesta inmediata para runoverlay
+	if command == "runoverlay" {
+		return map[string]interface{}{
+			"success": true,
+			"pid":     cmd.Process.Pid,
+		}, nil
+	}
+
+	return map[string]interface{}{"success": true}, nil
+}
+
+// RestartModTools reinicia mod-tools con las skins instaladas
+func (a *App) RestartModTools() (bool, error) {
+	// Verificar si el proceso realmente existe antes de matarlo
+	if a.modToolsProcess != nil {
+		if _, err := os.FindProcess(a.modToolsProcess.Pid); err != nil {
+			a.modToolsProcess = nil // Limpiar referencia obsoleta
+		}
+	}
+
+	if _, err := a.KillModTools(); err != nil {
+		runtime.LogWarning(a.ctx, "No se pudo terminar proceso existente, continuando...")
+	}
+
+	// Construir argumentos
+	args := []string{
+		ProfilesPath,
+		"--game:" + GamePath,
+		"configless",
+	}
+
+	if modsArg := strings.Join(getInstalledFiles(a.installedSkins), "/"); modsArg != "" {
+		args = append(args, "--mods:"+modsArg)
+	}
+
+	// Ejecutar runoverlay
+	result, err := a.RunModToolCommand("runoverlay", args)
+	if err != nil {
+		return false, fmt.Errorf("failed to start mod-tools: %v", err)
+	}
+
+	return result["success"] == true, nil
+}
+
+// FilterAndFormatOutput filtra y formatea la salida de mod-tools
+func filterAndFormatOutput(output string) string {
+	lines := strings.Split(output, "\n")
+	var filtered []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "[DLL] info:") || strings.Contains(line, "[INF] Done!") {
+			continue
+		}
+		if strings.Contains(line, "redirected wad:") {
+			parts := strings.Split(line, "/")
+			wad := parts[len(parts)-1]
+			line = fmt.Sprintf("Hunted wad: %s", wad)
+		}
+		if strings.Contains(line, "[INF] Writing wad:") {
+			parts := strings.Split(line, "/")
+			wad := parts[len(parts)-1]
+			line = fmt.Sprintf("Hunted wad: %s", wad)
+		}
+		filtered = append(filtered, line)
+	}
+	return strings.Join(filtered, "\n")
+}
+
+// Expresiones regulares precompiladas para mejor rendimiento
+var (
+	regexRedirectedWad = regexp.MustCompile(`redirected wad: .*/([^/]+\.wad\.client)`)
+	regexWritingWad    = regexp.MustCompile(`\[INF\] Writing wad: .*/([^/]+\.wad\.client)`)
+)
+
+// CleanupTempFiles elimina archivos temporales
+func (a *App) CleanupTempFiles() error {
+	files, err := os.ReadDir(a.installedPath)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), ".tmp") {
+			os.Remove(filepath.Join(a.installedPath, file.Name()))
+		}
+	}
+	return nil
+}
+
+// UninstallSkin desinstala una skin
+func (a *App) UninstallSkin(championId string) map[string]interface{} {
+	skin, exists := a.installedSkins[championId]
+	if !exists {
+		return map[string]interface{}{"success": false, "error": "Skin not found"}
+	}
+	a.KillModTools()
+	filePath := filepath.Join(a.installedPath, skin.FileName)
+	if err := os.Remove(filePath); err != nil {
+		os.Rename(filePath, filePath+".tmp")
+	}
+	delete(a.installedSkins, championId)
+	a.SaveInstalledSkins()
+	return a.createOverlayOnly()
+}
+
+// UninstallMultipleSkins desinstala múltiples skins
+func (a *App) UninstallMultipleSkins(championIds []string) map[string]interface{} {
+	if len(championIds) == 0 {
+		return map[string]interface{}{"success": false, "error": "No champions selected"}
+	}
+	a.KillModTools()
+	for _, championId := range championIds {
+		if skin, exists := a.installedSkins[championId]; exists {
+			filePath := filepath.Join(a.installedPath, skin.FileName)
+			if err := os.Remove(filePath); err != nil {
+				os.Rename(filePath, filePath+".tmp")
+			}
+			delete(a.installedSkins, championId)
+		}
+	}
+	a.SaveInstalledSkins()
+	return a.createOverlayOnly()
+}
+
+// createOverlayOnly recrea el overlay sin reiniciar mod-tools
+func (a *App) createOverlayOnly() map[string]interface{} {
+	if len(a.installedSkins) > 0 {
+		modsArg := strings.Join(getInstalledFiles(a.installedSkins), "/")
+		result, err := a.RunModToolCommand("mkoverlay", []string{a.installedPath, ProfilesPath, "--game:" + GamePath, "--mods:" + modsArg})
+		if err != nil {
+			return map[string]interface{}{"success": false, "error": err.Error()}
+		}
+		return result
+	}
+	return map[string]interface{}{"success": true}
+}
+
+func getInstalledFiles(skins map[string]SkinInfo) []string {
+	files := make([]string, 0)
+	for _, skin := range skins {
+		files = append(files, skin.FileName)
+	}
+	return files
+}
+
+// StartOverlay inicia el overlay
+func (a *App) StartOverlay() map[string]interface{} {
+	success, err := a.RestartModTools()
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	return map[string]interface{}{"success": success}
+}
+
+// StopOverlay detiene el overlay
+func (a *App) StopOverlay() map[string]interface{} {
+	success, err := a.KillModTools()
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	return map[string]interface{}{"success": success}
+}
+
+// SaveModStatus guarda el estado del mod
+func (a *App) SaveModStatus(statusData map[string]interface{}) map[string]interface{} {
+	a.EnsureDirectories()
+	data, _ := json.MarshalIndent(statusData, "", "  ")
+	if err := os.WriteFile(ModStatusPath, data, 0644); err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	return map[string]interface{}{"success": true}
+}
+
+// GetModStatus obtiene el estado del mod
+func (a *App) GetModStatus() interface{} {
+	a.EnsureDirectories()
+	data, err := os.ReadFile(ModStatusPath)
+	if err != nil {
+		return nil
+	}
+	var status interface{}
+	json.Unmarshal(data, &status)
+	return status
+}
+
+// GetInstalledSkins devuelve las skins instaladas
+func (a *App) GetInstalledSkins() []map[string]interface{} {
+	installedPath := filepath.Join(a.installedPath, "installed.json")
+	data, err := os.ReadFile(installedPath)
+	if err != nil {
+		fmt.Printf("Error reading installed.json: %v\n", err)
+		return []map[string]interface{}{}
+	}
+
+	var installedSkins []map[string]interface{}
+	if err := json.Unmarshal(data, &installedSkins); err != nil {
+		fmt.Printf("Error parsing installed.json: %v\n", err)
+		return []map[string]interface{}{}
+	}
+
+	return installedSkins
+}
+
+// CleanupLocalStorage limpia el almacenamiento local
+func (a *App) CleanupLocalStorage() map[string]interface{} {
+	os.Remove(ModStatusPath)
+	return map[string]interface{}{"success": true}
+}
+
+// Login autentica un usuario
+func (a *App) Login(login, password string) map[string]interface{} {
+	user, err := findUserByLogin(login)
+	if err != nil || user == nil {
+		return map[string]interface{}{"success": false, "error": "User not found"}
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user["password"].(string)), []byte(password)); err != nil {
+		return map[string]interface{}{"success": false, "error": "Incorrect password"}
+	}
+	token, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"id": user["id"],
+	}).SignedString([]byte(JWTSecret))
+	return map[string]interface{}{
+		"success": true,
+		"message": "Login successful",
+		"token":   token,
+		"user": map[string]interface{}{
+			"id":            user["id"],
+			"email":         user["email"],
+			"login":         user["login"],
+			"fichasporskin": user["fichasporskin"],
+			"escomprador":   user["escomprador"],
+		},
+	}
+}
+
+// Register registra un nuevo usuario
+func (a *App) Register(email, password, login string) map[string]interface{} {
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), 10)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+
+	// Create user data
+	userData := map[string]interface{}{
+		"email":         email,
+		"password":      string(hashedPassword),
+		"login":         login,
+		"fichasporskin": 0,
+		"escomprador":   false,
+	}
+
+	var result interface{}
+	_, err = supabaseClient.From("users").Insert(userData, false, "", "", "").ExecuteTo(&result)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok || resultMap == nil {
+		return map[string]interface{}{"success": false, "error": "No user data returned"}
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"message": "Register successful",
+		"user": map[string]interface{}{
+			"id":            resultMap["id"],
+			"email":         email,
+			"login":         login,
+			"fichasporskin": 0,
+			"escomprador":   false,
+		},
+	}
+}
+
+// UpdateUserData actualiza los datos de un usuario
+func (a *App) UpdateUserData(userId string, data map[string]interface{}) error {
+	_, err := supabaseClient.From("users").Update(data, "id", "eq").ExecuteTo(nil)
+	return err
+}
+
+// DownloadSkin descarga e instala una skin desde Supabase Storage
+func (a *App) DownloadSkin(championId, skinNum, userId string, token, skinName, fileName, chromaName, sanitizedImageUrl, baseSkinName string) map[string]interface{} {
+	// Verificar token JWT
+	claims := jwt.MapClaims{}
+	_, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWTSecret), nil
+	})
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": "Invalid token"}
+	}
+
+	// Buscar usuario por ID
+	user, err := findUserById(userId)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": "User not found"}
+	}
+
+	if !user["escomprador"].(bool) {
+		return map[string]interface{}{"success": false, "error": "No tienes acceso a esta función"}
+	}
+
+	// Cargar skins instaladas existentes
+	if err := a.LoadInstalledSkins(); err != nil {
+		fmt.Printf("Warning: Could not load existing skins: %v\n", err)
+	}
+
+	// Generar nombre de archivo sanitizado
+	filePath := filepath.Join(a.installedPath, fileName)
+
+	// Descargar skin desde Supabase Storage
+	bucket := "campeones"
+	skinPath := fmt.Sprintf("campeones/%s/%s.fantome", championId, skinNum)
+
+	// Descargar el archivo usando Supabase Go Storage
+	fileBytes, err := downloadFileFromSupabase(bucket, skinPath)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Error downloading skin: %v", err)}
+	}
+
+	// Guardar el archivo descargado
+	err = os.WriteFile(filePath, fileBytes, 0644)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Error saving skin file: %v", err)}
+	}
+
+	// // Importar skin con mod-tools
+	// importResult, err := a.RunModToolCommand("import", []string{
+	// 	filePath,
+	// 	filePath,
+	// 	"--noTFT",
+	// 	"--game:" + GamePath,
+	// 	"--verbose",
+	// })
+
+	// if err != nil {
+	// 	// Intentar obtener el error detallado del resultado
+	// 	if errMsg, ok := importResult["error"].(string); ok && errMsg != "" {
+	// 		runtime.LogError(a.ctx, fmt.Sprintf("Import error: %v - %s", err, errMsg))
+	// 		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Import error: %s", errMsg)}
+	// 	}
+	// 	runtime.LogError(a.ctx, fmt.Sprintf("Import error: %v", err))
+	// 	return map[string]interface{}{"success": false, "error": fmt.Sprintf("Import error: %v", err)}
+	// }
+
+	// if importResult["success"] != true {
+	// 	if errMsg, ok := importResult["error"].(string); ok && errMsg != "" {
+	// 		runtime.LogError(a.ctx, fmt.Sprintf("Import failed: %s", errMsg))
+	// 		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Import failed: %s", errMsg)}
+	// 	}
+	// 	return map[string]interface{}{"success": false, "error": "Failed to import skin: unknown error"}
+	// }
+
+	// // Verificar que el archivo se haya importado correctamente
+	// importedPath := filepath.Join(a.installedPath, fileName)
+	// if _, err := os.Stat(importedPath); os.IsNotExist(err) {
+	// 	runtime.LogError(a.ctx, fmt.Sprintf("Imported file not found: %s", importedPath))
+	// 	return map[string]interface{}{"success": false, "error": "Imported file not found"}
+	// }
+
+	// // Registrar la skin en installedSkins
+	// a.installedSkins[championId] = SkinInfo{
+	// 	SkinId:     skinNum,
+	// 	FileName:   fileName,
+	// 	ProcessId:  "0",
+	// 	ChromaName: chromaName,
+	// 	SkinName:   baseSkinName,
+	// 	ImageUrl:   sanitizedImageUrl,
+	// }
+	// a.SaveInstalledSkins()
+
+	// // Crear el overlay con todas las skins instaladas
+	// modsArg := strings.Join(getInstalledFiles(a.installedSkins), "/")
+	// _, err = a.RunModToolCommand("mkoverlay", []string{
+	// 	a.installedPath,
+	// 	ProfilesPath,
+	// 	"--game:" + GamePath,
+	// 	"--mods:" + modsArg,
+	// })
+	// if err != nil {
+	// 	return map[string]interface{}{"success": false, "error": fmt.Sprintf("Error creating overlay: %v", err)}
+	// }
+
+	return map[string]interface{}{
+		"success": true,
+		"message": "Skin Downloaded successfully",
+	}
+}
+
+// downloadFileFromSupabase descarga un archivo desde Supabase Storage
+func downloadFileFromSupabase(bucket, path string) ([]byte, error) {
+	// Crear un nuevo cliente de storage
+	storageClient := storage.NewClient(
+		SupabaseURL+"/storage/v1",
+		SupabaseKey,
+		map[string]string{
+			"Authorization": "Bearer " + SupabaseKey,
+		},
+	)
+
+	// Crear la URL de descarga
+	downloadURL := fmt.Sprintf("%s/object/public/%s/%s", SupabaseURL+"/storage/v1", bucket, path)
+
+	// Crear la solicitud
+	req, err := storageClient.NewRequest("GET", downloadURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %v", err)
+	}
+
+	// Realizar la solicitud
+	var response *http.Response
+	if response, err = storageClient.Do(req, nil); err != nil {
+		return nil, fmt.Errorf("error downloading file: %v", err)
+	}
+	defer response.Body.Close()
+
+	// Leer el contenido
+	return io.ReadAll(response.Body)
+}
+
+// FetchChampionJson obtiene el JSON de un campeón desde Supabase Storage
+func (a *App) FetchChampionJson(champId string) map[string]interface{} {
+	bucket := "api_json" // Ajusta el nombre del bucket según tu configuración
+	path := fmt.Sprintf("champions/%s.json", champId)
+
+	data, err := downloadFileFromSupabase(bucket, path)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Error fetching champion data: %v", err)}
+	}
+
+	var championData map[string]interface{}
+	if err := json.Unmarshal(data, &championData); err != nil {
+		return map[string]interface{}{"success": false, "error": "Invalid champion data format"}
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"data":    championData,
+	}
+}
+
+func copyFile(srcFilePath, dstFilePath string) error {
+	// Abrir el archivo fuente
+	srcFile, err := os.Open(srcFilePath)
+	if err != nil {
+		return fmt.Errorf("Error opening source file: %v", err)
+	}
+	defer srcFile.Close()
+
+	// Crear el archivo de destino
+	dstFile, err := os.Create(dstFilePath)
+	if err != nil {
+		return fmt.Errorf("Error creating destination file: %v", err)
+	}
+	defer dstFile.Close()
+
+	// Copiar el contenido del archivo fuente al archivo de destino
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return fmt.Errorf("Error copying file: %v", err)
+	}
+
+	// Asegurarse de que los cambios se escriban en el archivo de destino
+	err = dstFile.Sync()
+	if err != nil {
+		return fmt.Errorf("Error syncing file: %v", err)
+	}
+
+	return nil
+}
+
+// InstallSkin instala una skin y mantiene el proceso en segundo plano
+func (a *App) InstallSkin(championId, skinId, fileName, chromaName, imageUrl, baseSkinName string) map[string]interface{} {
+	filePath := filepath.Join(a.installedPath, fileName)
+
+	// Verificar si el archivo existe
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return map[string]interface{}{"success": false, "error": "Skin file not found"}
+	}
+
+	// Eliminar procesos de mod-tools si existen
+	a.KillModTools()
+
+	// Limpiar archivos temporales
+	a.CleanupTempFiles()
+
+	// Asegurar que existen los directorios
+	a.EnsureDirectories()
+
+	// Crear una carpeta con el mismo nombre que el archivo .fantome
+	// folderPath := filepath.Join(a.installedPath, strings.TrimSuffix(fileName, ".fantome"))
+	// err := os.MkdirAll(folderPath, 0755)
+	// if err != nil {
+	// 	return map[string]interface{}{"success": false, "error": fmt.Sprintf("Error creating folder: %v", err)}
+	// }
+
+	// // Copiar el archivo .fantome al nuevo directorio
+	// dstFilePath := filepath.Join(folderPath, fileName)
+	// err = copyFile(filePath, dstFilePath)
+	// if err != nil {
+	// 	fmt.Println("Error:", err)
+	// } else {
+	// 	fmt.Println("Archivo copiado correctamente!")
+	// }
+
+	// Importar la skin
+	importResult, err := a.RunModToolCommand("import", []string{
+		filePath, // Usamos la ruta del archivo dentro de la nueva carpeta
+		filePath,
+		"--noTFT",
+	})
+	if err != nil {
+		runtime.LogError(a.ctx, fmt.Sprintf("Import error: %v", err))
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Import error: %v", err)}
+	}
+
+	if importResult["success"] != true {
+		if errMsg, ok := importResult["error"].(string); ok && errMsg != "" {
+			runtime.LogError(a.ctx, fmt.Sprintf("Import failed: %s", errMsg))
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Import failed: %s", errMsg)}
+		}
+		return map[string]interface{}{"success": false, "error": "Failed to import skin: unknown error"}
+	}
+
+	// Verificar que el archivo se haya importado correctamente
+	importedPath := filepath.Join(a.installedPath, fileName)
+	if _, err := os.Stat(importedPath); os.IsNotExist(err) {
+		runtime.LogError(a.ctx, fmt.Sprintf("Imported file not found: %s", importedPath))
+		return map[string]interface{}{"success": false, "error": "Imported file not found"}
+	}
+
+	// Registrar la skin
+	a.installedSkins[championId] = SkinInfo{
+		SkinId:     skinId,
+		FileName:   fileName,
+		ChromaName: chromaName,
+		ImageUrl:   imageUrl,
+		SkinName:   baseSkinName,
+		ProcessId:  "0",
+	}
+	a.SaveInstalledSkins()
+
+	var modsArg []string
+	for _, skin := range a.installedSkins {
+		modsArg = append(modsArg, skin.FileName)
+	}
+	modsArgStr := strings.Join(modsArg, "/")
+	fmt.Println(modsArgStr)
+	overlayResult, err := a.RunModToolCommand("mkoverlay", []string{
+		a.installedPath,
+		ProfilesPath,
+		"--game:" + GamePath,
+		"--mods:" + modsArgStr,
+	})
+	if err != nil || overlayResult["success"] != true {
+		return map[string]interface{}{"success": false, "error": "Failed to create overlay"}
+	}
+
+	// Ejecutar el overlay en segundo plano
+	success, err := a.RestartModTools()
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	return map[string]interface{}{"success": success}
+
+}
+
+// GetUserData obtiene datos del usuario
+func (a *App) GetUserData(token string) map[string]interface{} {
+	claims := jwt.MapClaims{}
+	decoded, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
+		return []byte(JWTSecret), nil
+	})
+
+	if err != nil || !decoded.Valid {
+		return map[string]interface{}{"success": false, "error": "Invalid token"}
+	}
+
+	// Ensure id is converted to string
+	userId := fmt.Sprintf("%.0f", claims["id"].(float64))
+	user, err := findUserById(userId)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": "User not found"}
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"user":    user,
+	}
+}
+
+// Funciones auxiliares de Supabase
+func findUserById(userId string) (map[string]interface{}, error) {
+	data, _, err := supabaseClient.From("users").Select("*", "", false).Eq("id", userId).Single().Execute()
+	if err != nil {
+		return nil, err
+	}
+	var user map[string]interface{}
+	json.Unmarshal(data, &user)
+	return user, nil
+}
+
+func findUserByLogin(login string) (map[string]interface{}, error) {
+	data, _, err := supabaseClient.From("users").Select("*", "", false).Eq("login", login).Single().Execute()
+	if err != nil {
+		return nil, err
+	}
+	var user map[string]interface{}
+	json.Unmarshal(data, &user)
+	return user, nil
+}
+
+func generateFileName(skinName, chromaName string) string {
+	// Limpieza del nombre base (skinName)
+	baseName := strings.ToLower(strings.ReplaceAll(skinName, "[^a-z0-9\\s-]", ""))
+	baseName = strings.ReplaceAll(baseName, "\\s+", "-")
+
+	// Verificar si chromaName es vacío o null
+	if chromaName == "" || chromaName == "null" { // 'null' en string, si es un valor no esperado.
+		return fmt.Sprintf("%s.fantome", baseName)
+	}
+
+	// Limpieza del nombre chroma
+	chromaPart := strings.ToLower(strings.ReplaceAll(chromaName, "[^a-z0-9\\s-]", ""))
+	chromaPart = strings.ReplaceAll(chromaPart, "\\s+", "-")
+
+	return fmt.Sprintf("%s-%s.fantome", baseName, chromaPart)
+}

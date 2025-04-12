@@ -1,0 +1,149 @@
+@import url("https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap");
+
+@import "tailwindcss/base";
+@import "@radix-ui/themes/styles.css";
+
+@tailwind components;
+@tailwind utilities;
+
+.radix-themes {
+  --color-background: #000000;
+  /* Fondo de la página */
+  --color-panel-solid: #121212;
+  /* Fondo de paneles sólidos como tarjetas */
+  --color-panel-translucent: rgba(0, 0, 0, 0.5);
+  /* Fondo de paneles translúcidos */
+  --color-surface: #1a1a1a;
+  /* Fondo de inputs, checkboxes, etc. */
+  --color-overlay: rgba(0, 0, 0, 0.8);
+  /* Fondo de overlays de diálogos */
+  --data-state-closed: animation: none !important;
+
+}
+.rt-BaseDialogScroll {
+
+overflow: hidden;
+
+
+}
+/* div.radix-themes.dark.rt-BaseDialogOverlay.rt-DialogOverlay {
+  animation: none !important;
+}
+
+div.radix-themes.dark.rt-BaseDialogOverlay.rt-DialogOverlay::before {
+  animation: none !important;
+}
+
+div#radix-\\:r2\\:rt-BaseDialogContent.rt-DialogContent.rt-r-size-3.rt-r-max-w.custom-dialog {
+  animation: none !important;
+} */
+
+
+.rt-BaseDialogContent:where([data-state='open']) {
+  animation: rt-dialog-content-show 150ms cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+@media (prefers-reduced-motion: no-preference) {
+
+
+  .rt-BaseDialogContent:where([data-state='open']) {
+    animation-name: rt-dialog-content-show !important;
+    animation-duration: 150ms !important;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1) !important;
+    animation-fill-mode: forwards !important;
+  }
+  
+  
+
+
+}
+.rt-BaseDialogContent:where([data-state='open']) {
+  animation-name: rt-dialog-content-show !important;
+  animation-duration: 150ms !important;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1) !important;
+  animation-fill-mode: forwards !important;
+}
+
+.rt-dialog-content-hide {
+
+  animation: none !important;
+
+
+}
+
+.rt-dialog-overlay-no-op {
+
+  animation: none !important;
+}
+
+.rt-fade-out {
+
+
+  animation: none !important;
+
+}
+
+.rt-BaseDialogContent:where([data-state='close']) {
+  animation: none !important;
+  ;
+
+}
+
+.rt-BaseDialogContent:where([data-state='close']) {
+
+  animation: none !important;
+  ;
+
+}
+
+.rt-BaseDialogContent:where([data-state='close'])::before {
+  animation: none !important;
+  ;
+
+}
+
+.rt-BaseDialogOverlay:where([data-state='close']) {
+  animation: none !important;
+  ;
+
+}
+
+.rt-BaseDialogOverlay:where([data-state='open'])::before {
+  animation: none !important;
+  ;
+
+}
+
+.radix-themes [rt-BaseDialogOverlay][data-state="closed"],
+[rt-DialogOverlay][data-state="closed"] {
+  animation: none !important;
+}
+
+[radix-themes][dark][rt-BaseDialogOverlay][data-state="closed"] {
+
+  animation: none !important;
+
+
+}
+
+[radix-themes][dark][rt-DialogOverlay][data-state="closed"] {
+  animation: none !important;
+}
+
+body {
+  margin: 0;
+  font-family: "Poppins", "Roboto", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: linear-gradient(to top, #050505, #111);
+  background-attachment: fixed;
+  overflow-y: scroll;
+  color: white;
+  overflow-x: hidden;
+  /* cursor: url(https://cur.cursors-4u.net/games/gam-14/gam1340.cur), auto !important; */
+
+}
+
+body::-webkit-scrollbar {
+  display: none;
+  /* Chrome, Safari y Edge */
+}
