@@ -12,7 +12,7 @@ import { SkinLine, SkinLinesIndex } from '../components/SkinLines';
 import { motion, AnimatePresence } from 'framer-motion';
 import ModOverlayButton from '../components/ModOverlayButton';
 import { GetUserData, GetModStatus } from '../../wailsjs/go/main/App';
-
+import { EventsOn, EventsOff } from "../../wailsjs/runtime/runtime";
 const TabTransition = ({ children, className }) => (
   <motion.div
     initial={{ opacity: 0, y: 20 }}
@@ -150,25 +150,34 @@ const AppInterface = () => {
       setCurrentStatus(savedStatus);
     }
 
-    if (window.modStatus) {
-      window.modStatus.onStatusUpdate((newStatus) => {
-        console.log('New status received:', newStatus);
+    // Create a global function to update status from anywhere
+    window.updateGlobalStatus = (newStatus) => {
+      console.log('New status received:', newStatus);
+      
+      // Clean up the status message if needed
+      const formattedStatus = newStatus.replace("Status: ", "");
+      
+      setCurrentStatus(formattedStatus);
+      
+      // Save to localStorage for persistence
+      localStorage.setItem('modStatus', formattedStatus);
+    };
 
-        // Si el mensaje es "Status: Waiting for league match to start", limpiarlo
-        const formattedStatus = newStatus.replace("Status: ", "");
+    // Listen for events from the backend
+    EventsOn("overlay-stdout-update", (data) => {
+      window.updateGlobalStatus(data.content);
+    });
+    
+    EventsOn("overlay-stderr-update", (data) => {
+      window.updateGlobalStatus(`Error: ${data.content}`);
+    });
 
-        setCurrentStatus(formattedStatus);
-
-        // Guardar en localStorage para futuras recargas
-        localStorage.setItem('modStatus', formattedStatus);
-      });
-
-      return () => {
-        window.modStatus.removeStatusListener();
-      };
-    } else {
-      console.log('modStatus is not available'); // Para debugging
-    }
+    return () => {
+      // Clean up event listeners
+      delete window.updateGlobalStatus;
+      EventsOff("overlay-stdout-update");
+      EventsOff("overlay-stderr-update");
+    };
   }, []);
 
   return (

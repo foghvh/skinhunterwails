@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +24,12 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/crypto/bcrypt"
 )
+
+func init() {
+	// Pre-create the PowerShell command to load System.Windows.Forms
+	loadFormsCmd := exec.Command("powershell", "-Command", "Add-Type -AssemblyName System.Windows.Forms")
+	_ = loadFormsCmd.Run()
+}
 
 // App struct
 type App struct {
@@ -218,20 +226,74 @@ func (a *App) SaveInstalledSkins() error {
 	return nil
 }
 
-// KillModTools termina el proceso de mod-tools.exe
-// KillModTools termina el proceso de mod-tools.exe
 // KillModTools termina el proceso de mod-tools.exe y sus hijos
 func (a *App) KillModTools() (bool, error) {
-	runtime.LogInfo(a.ctx, "Attempting to kill mod-tools.exe by name")
+	runtime.LogInfo(a.ctx, "Attempting to gracefully stop mod-tools.exe")
+
+	// First try to find the window by title
+	findWindowCmd := exec.Command("powershell", "-Command", "Get-Process | Where-Object {$_.ProcessName -eq 'cmd' -and $_.MainWindowTitle -like '*run_overlay.bat*'} | Select-Object -ExpandProperty Id")
+	output, err := findWindowCmd.Output()
+	if err == nil && len(output) > 0 {
+		// Found the window, now send Ctrl+C, Enter, and "exit" commands
+		pidStr := strings.TrimSpace(string(output))
+		runtime.LogInfof(a.ctx, "Found cmd window with PID: %s", pidStr)
+
+		// Send Ctrl+C to the window
+		sendCtrlCCmd := exec.Command("powershell", "-Command", fmt.Sprintf("$wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate(%s); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('^C')", pidStr))
+		if err := sendCtrlCCmd.Run(); err == nil {
+			runtime.LogInfo(a.ctx, "Sent Ctrl+C to the window")
+
+			// Wait a moment for Ctrl+C to be processed
+			time.Sleep(1 * time.Second)
+
+			// Send Enter key to confirm "Terminate batch job (Y/N)?"
+			sendEnterCmd := exec.Command("powershell", "-Command", fmt.Sprintf("$wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate(%s); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('y')", pidStr))
+			if err := sendEnterCmd.Run(); err == nil {
+				runtime.LogInfo(a.ctx, "Sent 'y' key to confirm termination")
+
+				// Wait a moment and send "exit" command
+				time.Sleep(500 * time.Millisecond)
+				sendExitCmd := exec.Command("powershell", "-Command", fmt.Sprintf("$wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate(%s); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('exit{ENTER}')", pidStr))
+				if err := sendExitCmd.Run(); err == nil {
+					runtime.LogInfo(a.ctx, "Sent 'exit' command to close the window")
+
+					// Reset our process tracking
+					a.modToolsProcess = nil
+					a.modToolsPid = 0
+
+					// Emit event for frontend
+					runtime.EventsEmit(a.ctx, "overlay-stopped", map[string]interface{}{
+						"exitError": false,
+						"message":   "Process stopped gracefully by user",
+					})
+
+					return true, nil
+				}
+			}
+		}
+	}
+
+	// If the graceful approach failed, fall back to taskkill
+	runtime.LogWarning(a.ctx, "Graceful termination failed, falling back to taskkill")
+
+	// Fall back to taskkill
 	cmd := exec.Command("taskkill", "/F", "/IM", "mod-tools.exe")
-	output, err := cmd.CombinedOutput()
+	output, err = cmd.CombinedOutput()
 	if err == nil {
 		runtime.LogInfof(a.ctx, "Successfully killed mod-tools.exe: %s", string(output))
 		a.modToolsProcess = nil
 		a.modToolsPid = 0
+
+		// Emit event for frontend
+		runtime.EventsEmit(a.ctx, "overlay-stopped", map[string]interface{}{
+			"exitError": false,
+			"message":   "Process stopped by user",
+		})
+
 		return true, nil
 	}
 
+	// Rest of the function remains the same
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		status := exitErr.Sys().(syscall.WaitStatus).ExitStatus()
 		if status == 128 || status == 123 { // "No process found" codes
@@ -248,63 +310,97 @@ func (a *App) KillModTools() (bool, error) {
 	return false, fmt.Errorf("unexpected error killing mod-tools.exe: %v", err)
 }
 
-// RunOverlay executes mod-tools.exe in the background, using pipes
 func (a *App) RunOverlay(args []string) map[string]interface{} {
 	modToolsDir := filepath.Dir(absModToolsPath)
 
-	cmd := exec.Command(absModToolsPath, args...)
+	// Create a batch file to keep the process running
+	batchFilePath := filepath.Join(modToolsDir, "run_overlay.bat")
+	batchContent := fmt.Sprintf("@echo off\r\ncd /d \"%s\"\r\n\"%s\" %s\r\npause\r\n",
+		modToolsDir,
+		absModToolsPath,
+		strings.Join(args, " "))
+
+	if err := os.WriteFile(batchFilePath, []byte(batchContent), 0644); err != nil {
+		runtime.LogErrorf(a.ctx, "Failed to create batch file: %v", err)
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to create batch file: %v", err)}
+	}
+
+	// Start the batch file instead of direct command
+	cmd := exec.Command("cmd.exe", "/C", "start", batchFilePath)
 	cmd.Dir = modToolsDir
+
+	// Use CREATE_NEW_CONSOLE flag
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		// CREATE_NEW_PROCESS_GROUP is good for killing later if needed
-		// CREATE_NO_WINDOW hides the window
-		CreationFlags: 0x00000200 | 0x08000000,
+		CreationFlags: 0x00000010, // CREATE_NEW_CONSOLE
 	}
 
-	// --- Use Pipes instead of Files/DevNull ---
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		runtime.LogErrorf(a.ctx, "Failed to get stdout pipe: %v", err)
-		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Stdout Pipe Error: %v", err)}
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		runtime.LogErrorf(a.ctx, "Failed to get stderr pipe: %v", err)
-		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Stderr Pipe Error: %v", err)}
-	}
-	// -----------------------------------------
-
-	runtime.LogInfof(a.ctx, "Launching mod-tools.exe directly with args: %v (Dir: %s)", args, modToolsDir)
+	// Start the process
 	if err := cmd.Start(); err != nil {
-		runtime.LogErrorf(a.ctx, "Failed to start mod-tools.exe: %v", err)
+		runtime.LogErrorf(a.ctx, "Failed to start batch file: %v", err)
 		return map[string]interface{}{
 			"success": false,
-			"error":   fmt.Sprintf("Failed to launch mod-tools: %v", err),
+			"error":   fmt.Sprintf("Failed to start batch file: %v", err),
 		}
 	}
 
-	// Store the process and PID immediately after start
-	a.modToolsProcess = cmd.Process
-	a.modToolsPid = cmd.Process.Pid
-	runtime.LogInfof(a.ctx, "mod-tools.exe command started with PID: %d. Waiting for confirmation message...", a.modToolsPid)
+	// Wait a moment for the process to start
+	time.Sleep(1 * time.Second)
 
-	// Launch monitor goroutine, passing the pipes
-	go a.monitorOverlayProcess(cmd, stdoutPipe, stderrPipe)
+	// Find the mod-tools.exe process
+	cmdFind := exec.Command("tasklist", "/FI", "IMAGENAME eq mod-tools.exe", "/NH", "/FO", "CSV")
+	output, err := cmdFind.Output()
+	if err != nil || !strings.Contains(string(output), "mod-tools.exe") {
+		runtime.LogErrorf(a.ctx, "Failed to find mod-tools.exe process: %v", err)
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Failed to find mod-tools.exe process",
+		}
+	}
 
-	// NOTE: We now rely on the monitorOverlayProcess goroutine to emit
-	// 'overlay-started' or 'overlay-stopped' (with failure) based on pipe reading.
-	// The immediate return here just acknowledges the command was *issued*.
-	// The frontend should wait for the 'overlay-started' event for true confirmation.
+	// Extract PID from tasklist output
+	csvReader := csv.NewReader(strings.NewReader(string(output)))
+	records, err := csvReader.ReadAll()
+	if err != nil || len(records) == 0 {
+		runtime.LogErrorf(a.ctx, "Failed to parse tasklist output: %v", err)
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Failed to parse tasklist output",
+		}
+	}
+
+	pidStr := records[0][1]
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		runtime.LogErrorf(a.ctx, "Failed to convert PID to integer: %v", err)
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Failed to convert PID to integer",
+		}
+	}
+
+	a.modToolsPid = pid
+	runtime.LogInfof(a.ctx, "Found mod-tools.exe with PID: %d", pid)
+
+	// Emit the started event
+	runtime.EventsEmit(a.ctx, "overlay-started", map[string]interface{}{
+		"pid":     a.modToolsPid,
+		"message": "Overlay running and waiting for match",
+	})
+
 	return map[string]interface{}{
-		"success":     true, // Indicates command was started, not that overlay is fully running yet
-		"commandArgs": args,
-		"pid":         a.modToolsPid, // Return PID immediately
-		"message":     "Overlay process initiated, awaiting confirmation via logs...",
+		"success": true,
+		"pid":     a.modToolsPid,
+		"message": "Overlay process started",
 	}
 }
 
 func (a *App) StartRunOverlay() map[string]interface{} {
 	runtime.LogInfo(a.ctx, "StartRunOverlay called.")
-
+	// Reset mod status before starting
+	a.SaveModStatus(map[string]interface{}{
+		"status":     "idle",
+		"isDisabled": false,
+	})
 	// --- Check if already running (using Signal 0) ---
 	if a.modToolsPid != 0 {
 		process, err := os.FindProcess(a.modToolsPid)
@@ -427,6 +523,30 @@ func (a *App) StopRunOverlay() map[string]interface{} {
 	}
 }
 
+func (a *App) CheckModToolsRunning() bool {
+	// If we have a tracked PID, check if it's still running
+	if a.modToolsPid != 0 {
+		process, err := os.FindProcess(a.modToolsPid)
+		if err == nil {
+			errSignal := process.Signal(syscall.Signal(0))
+			if errSignal == nil {
+				// Process exists and we can signal it
+				return true
+			}
+		}
+	}
+
+	// Check if any mod-tools.exe is running using tasklist
+	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq mod-tools.exe", "/NH")
+	output, err := cmd.Output()
+	if err != nil {
+		runtime.LogErrorf(a.ctx, "Error checking if mod-tools.exe is running: %v", err)
+		return false
+	}
+
+	return strings.Contains(string(output), "mod-tools.exe")
+}
+
 // --- Nuevo Monitor para leer de Pipes ---
 func (a *App) monitorOverlayProcessWithoutPipeReads(cmd *exec.Cmd) {
 	pid := cmd.Process.Pid
@@ -537,7 +657,7 @@ func (a *App) monitorOverlayProcess(cmd *exec.Cmd, stdoutPipe, stderrPipe io.Rea
 			}
 			return // Exit monitor early on startup failure
 		}
-		runtime.LogInfof(a.ctx, "[Monitor PID %d] Overlay confirmed started. Proceeding to Wait()...", pid)
+		runtime.LogInfof(a.ctx, "[Monitor PID %d] Overlay confirmed started.", pid)
 
 	case <-time.After(15 * time.Second): // Timeout for startup confirmation
 		runtime.LogError(a.ctx, fmt.Sprintf("[Monitor PID %d] Timeout waiting for overlay confirmation message.", pid))
@@ -603,78 +723,6 @@ func (a *App) monitorOverlayProcess(cmd *exec.Cmd, stdoutPipe, stderrPipe io.Rea
 	}
 
 	runtime.LogInfof(a.ctx, "[Monitor PID %d] Exited monitoring goroutine.", pid)
-}
-
-// readLogUpdates reads new lines from a log file starting from a specific position
-func (a *App) readLogUpdates(logPath string, lastPos int64) ([]string, int64, error) {
-	file, err := os.Open(logPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, 0, nil
-		}
-		return nil, lastPos, err
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return nil, lastPos, err
-	}
-	currentSize := stat.Size()
-
-	if currentSize <= lastPos {
-		newPos := currentSize
-		if currentSize < lastPos {
-			runtime.LogWarningf(a.ctx, "Log file %s shrunk. Resetting read position.", logPath)
-			newPos = 0
-		}
-		return []string{}, newPos, nil
-	}
-
-	if _, err := file.Seek(lastPos, io.SeekStart); err != nil {
-		runtime.LogError(a.ctx, fmt.Sprintf("Failed to seek log file %s to %d: %v", logPath, lastPos, err))
-		return nil, 0, err
-	}
-
-	var lines []string
-	scanner := bufio.NewScanner(file)
-	bytesRead := int64(0) // Keep track of bytes consumed by the scanner
-
-	// --- bytesToRead declaration removed ---
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		lines = append(lines, line)
-		// Estimate bytes read: length of the line + 1 for the newline character.
-		// This is an estimate as scanner might handle different line endings, but good enough for the check.
-		currentLineBytes := int64(len(scanner.Bytes())) + 1
-		bytesRead += currentLineBytes
-
-		// Stop reading if the *next estimated position* (start + bytesRead so far)
-		// would exceed the size the file had when we started reading.
-		// This prevents reading lines that were added *during* this function's execution.
-		if (lastPos + bytesRead) >= currentSize {
-			break
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		runtime.LogError(a.ctx, fmt.Sprintf("Error scanning log file %s: %v", logPath, err))
-		// Return lines found so far, maybe reset position next time?
-		// For now, return the error and let the caller decide. Keep lastPos.
-		return lines, lastPos, err
-	}
-
-	// The new position is the old position plus the bytes we actually consumed.
-	newPos := lastPos + bytesRead
-
-	// Sanity check: clamp newPos to currentSize if calculation somehow went over.
-	if newPos > currentSize {
-		runtime.LogWarningf(a.ctx, "Calculated new log position (%d) exceeds current size (%d) for %s. Clamping.", newPos, currentSize, logPath)
-		newPos = currentSize
-	}
-
-	return lines, newPos, nil
 }
 
 func (a *App) RunModToolCommand(command string, args []string) (map[string]interface{}, error) {
@@ -1211,7 +1259,7 @@ func downloadFileFromSupabase(bucket, path string) ([]byte, error) {
 // FetchChampionJson obtiene el JSON de un campeón desde Supabase Storage
 func (a *App) FetchChampionJson(champId string) map[string]interface{} {
 	bucket := "api_json" // Ajusta el nombre del bucket según tu configuración
-	path := fmt.Sprintf("champions/%s.json", champId)
+	path := fmt.Sprintf("%s.json", champId)
 
 	data, err := downloadFileFromSupabase(bucket, path)
 	if err != nil {
@@ -1261,6 +1309,7 @@ func copyFile(srcFilePath, dstFilePath string) error {
 
 // InstallSkin instala una skin y mantiene el proceso en segundo plano
 func (a *App) InstallSkin(championId, skinId, fileName, chromaName, imageUrl, baseSkinName string) map[string]interface{} {
+
 	absFilePath := filepath.Join(absInstalledPath, fileName) // Ruta absoluta del archivo .fantome
 
 	if _, err := os.Stat(absFilePath); os.IsNotExist(err) {
@@ -1289,9 +1338,19 @@ func (a *App) InstallSkin(championId, skinId, fileName, chromaName, imageUrl, ba
 	}
 
 	// Registrar la skin (no cambia)
-	a.installedSkins[championId] = SkinInfo{ /* ... */ }
-	if err := a.SaveInstalledSkins(); err != nil { /* Manejar error */
-		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed save installed.json: %v", err)}
+	a.installedSkins[championId] = SkinInfo{
+		SkinId:     skinId,
+		FileName:   fileName,
+		ProcessId:  "0",
+		ChromaName: chromaName,
+		SkinName:   baseSkinName,
+		ImageUrl:   imageUrl,
+	}
+	if err := a.SaveInstalledSkins(); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to save installed skins: %v", err),
+		}
 	}
 
 	// Crear overlay usando rutas absolutas y nombres de mods relativos

@@ -1,18 +1,49 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Button, Flex, Tooltip } from '@radix-ui/themes';
 import { PlayIcon, PauseIcon, UpdateIcon } from '@radix-ui/react-icons';
 import { toast } from 'sonner';
 import useModStatus from '../data/hooks';
+import { KillModTools, CheckModToolsRunning } from "../../wailsjs/go/main/App";
 
 const ModOverlayButton = () => {
-  const { status, isDisabled, toggleOverlay, logs } = useModStatus();
+  const { status, isDisabled, toggleOverlay, logs, waitingForExit, setStatus } = useModStatus();
+
+  // Periodically check if process is still running
+  useEffect(() => {
+    if (status === "running") {
+      const checkInterval = setInterval(() => {
+        CheckModToolsRunning()
+          .then(isRunning => {
+            if (!isRunning && status === "running") {
+              // Process died unexpectedly
+              setStatus("stopped");
+              toast.error("Mod overlay process stopped unexpectedly");
+              
+              // Update global status
+              if (window.updateGlobalStatus) {
+                window.updateGlobalStatus("Process stopped unexpectedly");
+              }
+            }
+          })
+          .catch(console.error);
+      }, 5000); // Check every 5 seconds
+      
+      return () => clearInterval(checkInterval);
+    }
+  }, [status, setStatus]);
 
   const handleToggleOverlay = async () => {
     try {
-      await toggleOverlay();
       if (status === "running") {
-        toast.success("Mod overlay stopped successfully");
+        // Use KillModTools directly for more reliable stopping
+        const result = await KillModTools();
+        if (result) {
+          toast.success("Mod overlay stopped successfully");
+        } else {
+          toast.error("Failed to stop mod overlay");
+        }
       } else {
+        await toggleOverlay();
         toast.success("Mod overlay started successfully");
       }
     } catch (error) {
@@ -21,6 +52,15 @@ const ModOverlayButton = () => {
   };
 
   const getButtonContent = () => {
+    if (waitingForExit) {
+      return (
+        <Flex align="center" gap="2">
+          <UpdateIcon className="animate-spin" />
+          Waiting...
+        </Flex>
+      );
+    }
+    
     switch (status) {
       case "running":
         return (
@@ -62,6 +102,8 @@ const ModOverlayButton = () => {
   };
 
   const getButtonColor = () => {
+    if (waitingForExit) return "yellow";
+    
     switch (status) {
       case "error":
         return "red";
@@ -75,7 +117,9 @@ const ModOverlayButton = () => {
   };
 
   const getTooltipContent = () => {
+    if (waitingForExit) return "Waiting for exit...";
     if (isDisabled) return "Please wait...";
+    
     switch (status) {
       case "running":
         return "Click to stop the mod overlay";
@@ -110,7 +154,7 @@ const ModOverlayButton = () => {
     }>
       <Button
         onClick={handleToggleOverlay}
-        disabled={isDisabled}
+        disabled={isDisabled || waitingForExit}
         color={getButtonColor()}
         className="w-fit mt-20"
         size="2"

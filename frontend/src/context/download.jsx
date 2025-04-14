@@ -62,6 +62,18 @@ const downloadSkin = async (championId, skinId, setUserData, skin, selectedChrom
     const fileName = generateFileName(baseSkinName, chromaName);
     const sanitizedImageUrl = sanitizeImageUrl(imageUrl);
 
+    console.log("Downloading skin with parameters:", {
+      championId: String(Math.floor(skinId / 1000)),
+      skinNum: String(skinNum),
+      userId: String(userData.id),
+      token: token,
+      skinName: String(skin.name),
+      fileName: String(fileName),
+      chromaName: chromaName || "",
+      sanitizedImageUrl: String(sanitizedImageUrl),
+      baseSkinName: String(baseSkinName),
+    });
+
     // Descargar skin
     const downloadResponse = await DownloadSkin(
       String(Math.floor(skinId / 1000)),
@@ -74,6 +86,7 @@ const downloadSkin = async (championId, skinId, setUserData, skin, selectedChrom
       String(sanitizedImageUrl),
       String(baseSkinName)
     );
+    console.log("Download response:", downloadResponse);
 
     if (!downloadResponse.success) {
       throw new Error(downloadResponse.error || "Failed to download skin");

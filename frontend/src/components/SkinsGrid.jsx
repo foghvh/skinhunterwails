@@ -77,24 +77,46 @@ const SkinDialog = ({ skin, champKey, asset, rarity, chromas }) => {
 
   useEffect(() => {
     async function checkInstallation() {
-      const installedSkins = await GetInstalledSkins();
-      setIsInstalled(installedSkins.some(([champId]) => parseInt(champId) === parseInt(skin.id / 1000)));
+      try {
+        const installedSkins = await GetInstalledSkins();
+        if (!installedSkins) {
+          setIsInstalled(false);
+          return;
+        }
+        if (!Array.isArray(installedSkins)) {
+          console.error("Installed skins data is not an array:", installedSkins);
+          setIsInstalled(false);
+          return;
+        }
+        setIsInstalled(installedSkins.some(installedSkin => 
+          installedSkin.championId === String(Math.floor(skin.id / 1000))
+        ));
+      } catch (error) {
+        console.error("Error checking installation:", error);
+      }
     }
     checkInstallation();
   }, [skin.id]);
+
 
   
   const handleSelectChroma = (value) => {
     setSelectedChroma((prev) => (prev === value ? null : value));
   };
 
+  // In the handleDownload function of SkinDialog component
   const handleDownload = async () => {
     const idToDownload = selectedChroma ? parseInt(selectedChroma) : skin.id;
-
+  
     const selectedChromaData = selectedChroma
       ? chromas.find(chroma => String(chroma.id) === selectedChroma)
       : null;
-
+  
+    // Update global status
+    if (window.updateGlobalStatus) {
+      window.updateGlobalStatus(`Installing ${selectedChromaData ? 'chroma' : 'skin'}: ${skin.name}`);
+    }
+  
     await downloadSkin(
       Math.floor(skin.id / 1000),
       idToDownload,
@@ -102,22 +124,38 @@ const SkinDialog = ({ skin, champKey, asset, rarity, chromas }) => {
       skin,
       selectedChromaData
     );
+  
+    // Update global status after download
+    if (window.updateGlobalStatus) {
+      window.updateGlobalStatus(`Installed ${selectedChromaData ? 'chroma' : 'skin'}: ${skin.name}`);
+    }
   };
-
-
+  
+  // Similarly in handleUninstall
   const handleUninstall = async () => {
     const loadingToast = toast.loading('Uninstalling skin...');
     try {
       const championId = Math.floor(skin.id / 1000);
+      
+      // Update global status
+      if (window.updateGlobalStatus) {
+        window.updateGlobalStatus(`Uninstalling skin: ${skin.name}`);
+      }
+      
       const result = await window.modTools.uninstallSkin(championId);
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to uninstall skin');
       }
-
+  
       setIsInstalled(false);
       toast.dismiss(loadingToast);
       toast.success('Skin uninstalled successfully');
+  
+      // Update global status after uninstall
+      if (window.updateGlobalStatus) {
+        window.updateGlobalStatus(`Uninstalled skin: ${skin.name}`);
+      }
     } catch (error) {
       toast.dismiss(loadingToast);
       toast.error(error.message || 'Failed to uninstall skin');
