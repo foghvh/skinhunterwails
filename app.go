@@ -95,7 +95,12 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	appCtx = ctx // Guardar globalmente si es necesario para logs fuera de 'a'
-
+	modStatusData := map[string]interface{}{
+		"status":     "idle",
+		"isDisabled": false,
+	}
+	modStatusJson, _ := json.MarshalIndent(modStatusData, "", "  ")
+	os.WriteFile(absModStatusPath, modStatusJson, 0644)
 	var err error
 	supabaseClient, err = supabase.NewClient(SupabaseURL, SupabaseKey, nil)
 	if err != nil {
@@ -230,84 +235,62 @@ func (a *App) SaveInstalledSkins() error {
 func (a *App) KillModTools() (bool, error) {
 	runtime.LogInfo(a.ctx, "Attempting to gracefully stop mod-tools.exe")
 
-	// First try to find the window by title
-	findWindowCmd := exec.Command("powershell", "-Command", "Get-Process | Where-Object {$_.ProcessName -eq 'cmd' -and $_.MainWindowTitle -like '*run_overlay.bat*'} | Select-Object -ExpandProperty Id")
-	output, err := findWindowCmd.Output()
-	if err == nil && len(output) > 0 {
-		// Found the window, now send Ctrl+C, Enter, and "exit" commands
-		pidStr := strings.TrimSpace(string(output))
-		runtime.LogInfof(a.ctx, "Found cmd window with PID: %s", pidStr)
+	// First kill mod-tools.exe process
+	modToolsKilled := false
 
-		// Send Ctrl+C to the window
-		sendCtrlCCmd := exec.Command("powershell", "-Command", fmt.Sprintf("$wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate(%s); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('^C')", pidStr))
-		if err := sendCtrlCCmd.Run(); err == nil {
-			runtime.LogInfo(a.ctx, "Sent Ctrl+C to the window")
-
-			// Wait a moment for Ctrl+C to be processed
-			time.Sleep(1 * time.Second)
-
-			// Send Enter key to confirm "Terminate batch job (Y/N)?"
-			sendEnterCmd := exec.Command("powershell", "-Command", fmt.Sprintf("$wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate(%s); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('y')", pidStr))
-			if err := sendEnterCmd.Run(); err == nil {
-				runtime.LogInfo(a.ctx, "Sent 'y' key to confirm termination")
-
-				// Wait a moment and send "exit" command
-				time.Sleep(500 * time.Millisecond)
-				sendExitCmd := exec.Command("powershell", "-Command", fmt.Sprintf("$wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate(%s); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('exit{ENTER}')", pidStr))
-				if err := sendExitCmd.Run(); err == nil {
-					runtime.LogInfo(a.ctx, "Sent 'exit' command to close the window")
-
-					// Reset our process tracking
-					a.modToolsProcess = nil
-					a.modToolsPid = 0
-
-					// Emit event for frontend
-					runtime.EventsEmit(a.ctx, "overlay-stopped", map[string]interface{}{
-						"exitError": false,
-						"message":   "Process stopped gracefully by user",
-					})
-
-					return true, nil
-				}
+	// Try to kill by PID first if we have it
+	if a.modToolsPid != 0 {
+		process, err := os.FindProcess(a.modToolsPid)
+		if err == nil {
+			if err := process.Kill(); err == nil {
+				runtime.LogInfof(a.ctx, "Successfully killed mod-tools.exe with PID %d", a.modToolsPid)
+				modToolsKilled = true
 			}
 		}
 	}
 
-	// If the graceful approach failed, fall back to taskkill
-	runtime.LogWarning(a.ctx, "Graceful termination failed, falling back to taskkill")
-
-	// Fall back to taskkill
-	cmd := exec.Command("taskkill", "/F", "/IM", "mod-tools.exe")
-	output, err = cmd.CombinedOutput()
-	if err == nil {
-		runtime.LogInfof(a.ctx, "Successfully killed mod-tools.exe: %s", string(output))
-		a.modToolsProcess = nil
-		a.modToolsPid = 0
-
-		// Emit event for frontend
-		runtime.EventsEmit(a.ctx, "overlay-stopped", map[string]interface{}{
-			"exitError": false,
-			"message":   "Process stopped by user",
-		})
-
-		return true, nil
-	}
-
-	// Rest of the function remains the same
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		status := exitErr.Sys().(syscall.WaitStatus).ExitStatus()
-		if status == 128 || status == 123 { // "No process found" codes
-			runtime.LogInfo(a.ctx, "No mod-tools.exe process found to kill")
-			a.modToolsProcess = nil
-			a.modToolsPid = 0
-			return true, nil
+	// If PID kill failed, try by name
+	if !modToolsKilled {
+		killCmd := exec.Command("taskkill", "/F", "/IM", "mod-tools.exe")
+		if err := killCmd.Run(); err == nil {
+			runtime.LogInfo(a.ctx, "Successfully killed mod-tools.exe by name")
+			modToolsKilled = true
 		}
-		runtime.LogErrorf(a.ctx, "Failed to kill mod-tools.exe: %v, output: %s", err, string(output))
-		return false, fmt.Errorf("failed to kill mod-tools.exe: %v, output: %s", err, string(output))
 	}
 
-	runtime.LogErrorf(a.ctx, "Unexpected error killing mod-tools.exe: %v", err)
-	return false, fmt.Errorf("unexpected error killing mod-tools.exe: %v", err)
+	// Now find and close any cmd windows running our batch file
+	findCmdCmd := exec.Command("powershell", "-Command", "Get-Process | Where-Object {$_.ProcessName -eq 'cmd' -and $_.MainWindowTitle -like '*run_overlay*'} | Select-Object -ExpandProperty Id")
+	output, err := findCmdCmd.Output()
+	if err == nil && len(strings.TrimSpace(string(output))) > 0 {
+		// Found cmd windows, kill them
+		cmdPids := strings.Split(strings.TrimSpace(string(output)), "\r\n")
+		for _, pid := range cmdPids {
+			killCmdCmd := exec.Command("taskkill", "/F", "/PID", pid)
+			if err := killCmdCmd.Run(); err == nil {
+				runtime.LogInfof(a.ctx, "Successfully closed cmd window with PID %s", pid)
+			} else {
+				runtime.LogWarningf(a.ctx, "Failed to close cmd window with PID %s: %v", pid, err)
+			}
+		}
+	}
+
+	// Reset our process tracking
+	a.modToolsProcess = nil
+	a.modToolsPid = 0
+
+	// Update mod status
+	a.SaveModStatus(map[string]interface{}{
+		"status":     "idle",
+		"isDisabled": false,
+	})
+
+	// Emit event for frontend
+	runtime.EventsEmit(a.ctx, "overlay-stopped", map[string]interface{}{
+		"exitError": false,
+		"message":   "Process stopped by user",
+	})
+
+	return true, nil
 }
 
 func (a *App) RunOverlay(args []string) map[string]interface{} {

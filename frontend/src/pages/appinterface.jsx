@@ -13,6 +13,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import ModOverlayButton from '../components/ModOverlayButton';
 import { GetUserData, GetModStatus } from '../../wailsjs/go/main/App';
 import { EventsOn, EventsOff } from "../../wailsjs/runtime/runtime";
+// Import virtualization and lazy loading components
+import { FixedSizeGrid } from 'react-window';
+import AutoSizer from 'react-virtualized-auto-sizer';
+import { LazyLoadImage } from 'react-lazy-load-image-component';
+import 'react-lazy-load-image-component/src/effects/blur.css';
+
 const TabTransition = ({ children, className }) => (
   <motion.div
     initial={{ opacity: 0, y: 20 }}
@@ -40,6 +46,228 @@ const IconToggle = ({ showingSkinLines }) => (
   />
 );
 
+// Modify the ChampionsIndex component to use virtualization
+// Add this import at the top of the file
+import { EnhancedImage } from './champions';
+
+// Then in the VirtualizedChampionsIndex component, replace LazyLoadImage with EnhancedImage
+const VirtualizedChampionsIndex = ({ onChampionSelect }) => {
+  const [champions, setChampions] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  
+  useEffect(() => {
+    // Your existing champion loading logic
+    fetch('https://ddragon.leagueoflegends.com/cdn/14.9.1/data/en_US/champion.json')
+      .then(response => response.json())
+      .then(data => {
+        const champList = Object.values(data.data);
+        setChampions(champList);
+      })
+      .catch(error => console.error('Error fetching champions:', error));
+  }, []);
+
+  const filteredChampions = champions.filter(champion => 
+    champion.name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  // Calculate grid dimensions
+  const ITEM_WIDTH = 120;
+  const ITEM_HEIGHT = 150;
+  const ITEMS_PER_ROW = 5; // Adjust based on your layout
+
+  // Render a champion cell
+  const ChampionCell = ({ champion, style }) => (
+    <motion.div
+      whileHover={{ scale: 1.05 }}
+      whileTap={{ scale: 0.95 }}
+      onClick={() => onChampionSelect(champion.id)}
+      className="flex flex-col items-center p-2 cursor-pointer"
+      style={style}
+    >
+      <div className="w-16 h-16 rounded-full overflow-hidden mb-2">
+        <LazyLoadImage
+          src={`https://ddragon.leagueoflegends.com/cdn/14.9.1/img/champion/${champion.image.full}`}
+          alt={champion.name}
+          effect="blur"
+          width={64}
+          height={64}
+          className="w-full h-full object-cover"
+          threshold={100}
+          placeholderSrc="https://via.placeholder.com/64?text=..."
+        />
+      </div>
+      <Text size="1" className="text-center text-gray-200">{champion.name}</Text>
+    </motion.div>
+  );
+
+  // Cell renderer for react-window
+  const Cell = ({ columnIndex, rowIndex, style }) => {
+    const index = rowIndex * ITEMS_PER_ROW + columnIndex;
+    if (index >= filteredChampions.length) return null;
+    
+    const champion = filteredChampions[index];
+    return (
+      <motion.div
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.95 }}
+        onClick={() => onChampionSelect(champion.id)}
+        className="flex flex-col items-center p-2 cursor-pointer"
+        style={style}
+      >
+        <div className="w-16 h-16 rounded-full overflow-hidden mb-2">
+          <EnhancedImage
+            src={`https://ddragon.leagueoflegends.com/cdn/14.9.1/img/champion/${champion.image.full}`}
+            alt={champion.name}
+            className="w-full h-full object-cover"
+            style={{ backgroundColor: '#1e293b' }}
+            onError={(e) => {
+              console.error("Failed to load champion image:", champion.name);
+            }}
+          />
+        </div>
+        <Text size="1" className="text-center text-gray-200">{champion.name}</Text>
+      </motion.div>
+    );
+  };
+
+  return (
+    <div className="w-full h-full">
+      <div className="mb-4 px-4">
+        <input
+          type="text"
+          placeholder="Search champions..."
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          className="w-full p-2 bg-gray-800 text-white rounded"
+        />
+      </div>
+      
+      <div className="w-full h-[calc(100%-60px)]">
+        <AutoSizer>
+          {({ height, width }) => {
+            const columnCount = Math.floor(width / ITEM_WIDTH) || ITEMS_PER_ROW;
+            const rowCount = Math.ceil(filteredChampions.length / columnCount);
+            
+            return (
+              <FixedSizeGrid
+                columnCount={columnCount}
+                columnWidth={ITEM_WIDTH}
+                height={height}
+                rowCount={rowCount}
+                rowHeight={ITEM_HEIGHT}
+                width={width}
+              >
+                {Cell}
+              </FixedSizeGrid>
+            );
+          }}
+        </AutoSizer>
+      </div>
+    </div>
+  );
+};
+
+// Similarly, update the SkinLinesIndex component
+const VirtualizedSkinLinesIndex = ({ onSkinLineSelect }) => {
+  const [skinLines, setSkinLines] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  
+  useEffect(() => {
+    // Your existing skin lines loading logic
+    fetch('https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/skinlines.json')
+      .then(response => response.json())
+      .then(data => {
+        const filteredLines = data.filter(line => line.id > 0);
+        setSkinLines(filteredLines);
+      })
+      .catch(error => console.error('Error fetching skin lines:', error));
+  }, []);
+
+  const filteredSkinLines = skinLines.filter(line => 
+    line.name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  // Calculate grid dimensions
+  const ITEM_WIDTH = 160;
+  const ITEM_HEIGHT = 200;
+  const ITEMS_PER_ROW = 4; // Adjust based on your layout
+
+  // Render a skin line cell
+  const SkinLineCell = ({ skinLine, style }) => (
+    <motion.div
+      whileHover={{ scale: 1.05 }}
+      whileTap={{ scale: 0.95 }}
+      onClick={() => onSkinLineSelect(skinLine.id)}
+      className="flex flex-col items-center p-2 cursor-pointer"
+      style={style}
+    >
+      <div className="w-24 h-24 rounded-lg overflow-hidden mb-2">
+        <LazyLoadImage
+          src={`https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/assets/skinlines/${skinLine.id.toString().padStart(4, '0')}-${skinLine.name.toLowerCase().replace(/\s+/g, '')}/splash.jpg`}
+          alt={skinLine.name}
+          effect="blur"
+          width={96}
+          height={96}
+          className="w-full h-full object-cover"
+          threshold={100}
+          placeholderSrc="https://via.placeholder.com/96?text=..."
+          onError={(e) => {
+            e.target.onerror = null;
+            e.target.src = "https://via.placeholder.com/96?text=No+Image";
+          }}
+        />
+      </div>
+      <Text size="1" className="text-center text-gray-200">{skinLine.name}</Text>
+    </motion.div>
+  );
+
+  // Cell renderer for react-window
+  const Cell = ({ columnIndex, rowIndex, style }) => {
+    const index = rowIndex * ITEMS_PER_ROW + columnIndex;
+    if (index >= filteredSkinLines.length) return null;
+    
+    const skinLine = filteredSkinLines[index];
+    return <SkinLineCell skinLine={skinLine} style={style} />;
+  };
+
+  return (
+    <div className="w-full h-full">
+      <div className="mb-4 px-4">
+        <input
+          type="text"
+          placeholder="Search skin lines..."
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          className="w-full p-2 bg-gray-800 text-white rounded"
+        />
+      </div>
+      
+      <div className="w-full h-[calc(100%-60px)]">
+        <AutoSizer>
+          {({ height, width }) => {
+            const columnCount = Math.floor(width / ITEM_WIDTH) || ITEMS_PER_ROW;
+            const rowCount = Math.ceil(filteredSkinLines.length / columnCount);
+            
+            return (
+              <FixedSizeGrid
+                columnCount={columnCount}
+                columnWidth={ITEM_WIDTH}
+                height={height}
+                rowCount={rowCount}
+                rowHeight={ITEM_HEIGHT}
+                width={width}
+              >
+                {Cell}
+              </FixedSizeGrid>
+            );
+          }}
+        </AutoSizer>
+      </div>
+    </div>
+  );
+};
+
+// Update the MainContent component to use the virtualized components
 const MainContent = ({ activeTab, selectedChampion, setSelectedChampion, selectedSkinLine, setSelectedSkinLine }) => {
   const { champion } = useParams();
   const { userData, setUserData } = useUser();

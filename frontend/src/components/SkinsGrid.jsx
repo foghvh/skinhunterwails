@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef, memo } from "react";
 import {
   Card,
   Box,
@@ -28,31 +28,76 @@ import { InfoCircledIcon, Cross2Icon, CircleBackslashIcon, DownloadIcon, Accessi
 import { KhadaUrl } from "../data/data";
 import { useUser } from "../context/usercontext";
 import { useDownloadSkin } from "../context/download";
-import { useEffect } from "react";
 import { GetInstalledSkins } from "../../wailsjs/go/main/App";
+// Add this image cache to prevent reloading the same images
+const imageCache = new Map();
+
+// Create a memory-efficient dialog component
+const MemoryEfficientDialog = memo(({ children, isOpen, onClose }) => {
+  useEffect(() => {
+    // Clean up when dialog closes
+    return () => {
+      if (!isOpen) {
+        // Force garbage collection when dialog closes
+        setTimeout(() => {
+          if (window.gc) window.gc();
+        }, 100);
+      }
+    };
+  }, [isOpen]);
+  
+  return children;
+});
+
+// Elimina imageCache y MemoryEfficientDialog
+
 const SkinsGrid = ({ skins, champKey, asset, rarity, chromas }) => {
-  const capitalize = (str) => {
-    if (!str) return "";
-    return str.charAt(0).toUpperCase() + str.slice(1);
-  };
+  const [visibleSkins, setVisibleSkins] = useState([]);
+  const allSkinsRef = useRef([]);
+  const gridRef = useRef(null);
+
+  useEffect(() => {
+    allSkinsRef.current = skins.filter(skin => !skin.isBase);
+    setVisibleSkins(allSkinsRef.current.slice(0, 8));
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) {
+        setVisibleSkins(prev => {
+          if (prev.length >= allSkinsRef.current.length) return prev;
+          return [...prev, ...allSkinsRef.current.slice(prev.length, prev.length + 4)];
+        });
+      }
+    }, { rootMargin: '500px' });
+
+    if (gridRef.current) {
+      observer.observe(gridRef.current);
+    }
+
+    return () => {
+      if (observer) observer.disconnect();
+      allSkinsRef.current = [];
+      setVisibleSkins([]);
+    };
+  }, [skins]);
 
   return (
-    <Box className="grid grid-cols-[repeat(auto-fit,250px)] gap-3 justify-center items-center pb-7 justify-items-center">
-      {skins
-        .filter((skin) => !skin.isBase)
-        .map((skin) => (
-          <Dialog.Root key={skin.id}>
-            <Dialog.Trigger asChild>
-              <div className="cursor-pointer w-fit h-fit">
-                <SkinItem
-                  skin={skin}
-                  champKey={champKey}
-                  asset={asset}
-                  rarity={rarity}
-                />
-              </div>
-              
-            </Dialog.Trigger>
+    <Box
+      ref={gridRef}
+      className="grid grid-cols-[repeat(auto-fit,250px)] gap-3 justify-center items-center pb-7 justify-items-center"
+    >
+      {visibleSkins.map((skin) => (
+        <Dialog.Root key={skin.id}>
+          <Dialog.Trigger asChild>
+            <div className="cursor-pointer w-fit h-fit">
+              <SkinItem
+                skin={skin}
+                champKey={champKey}
+                asset={asset}
+                rarity={rarity}
+              />
+            </div>
+          </Dialog.Trigger>
+          <Dialog.Content>
             <SkinDialog
               skin={skin}
               champKey={champKey}
@@ -60,13 +105,23 @@ const SkinsGrid = ({ skins, champKey, asset, rarity, chromas }) => {
               rarity={rarity}
               chromas={chromas}
             />
-          </Dialog.Root>
-        ))}
+          </Dialog.Content>
+        </Dialog.Root>
+      ))}
+
+      {visibleSkins.length < allSkinsRef.current.length && (
+        <div className="col-span-full flex justify-center py-4">
+          <Skeleton>
+            <Box style={{ width: "200px", height: "10px" }} />
+          </Skeleton>
+        </div>
+      )}
     </Box>
   );
 };
 
-const SkinDialog = ({ skin, champKey, asset, rarity, chromas }) => {
+// Optimize SkinDialog component
+const SkinDialog = memo(({ skin, champKey, asset, rarity, chromas }) => {
   const [isLoadingDs, setIsLoadingDs] = useState(true);
   const [isInstalled, setIsInstalled] = useState(false);
   const { userData, setUserData } = useUser();
@@ -500,6 +555,7 @@ const SkinDialog = ({ skin, champKey, asset, rarity, chromas }) => {
       </Dialog.Content>
     </>
   );
-};
+}
+);
 
 export { SkinsGrid, SkinDialog };

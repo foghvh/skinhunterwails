@@ -6,6 +6,79 @@ import { Link, generatePath, useParams, useNavigate } from "react-router-dom";
 import ChampionDialog from '../components/ChampionDialog';
 import { SkinsGrid } from '../components/SkinsGrid';
 import { ArrowLeft} from 'lucide-react';
+
+
+
+export const EnhancedImage = memo(({ src, alt, className, style, onLoad, onError }) => {
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const imgRef = useRef(null);
+  
+  useEffect(() => {
+    // Reset states when src changes
+    setIsLoaded(false);
+    setHasError(false);
+    
+    // Preload image
+    const img = new Image();
+    img.src = src;
+    img.onload = () => {
+      setIsLoaded(true);
+      if (onLoad) onLoad();
+    };
+    img.onerror = () => {
+      setHasError(true);
+      if (onError) onError();
+    };
+    
+    return () => {
+      img.onload = null;
+      img.onerror = null;
+    };
+  }, [src]);
+  
+  return (
+    <>
+      {!isLoaded && !hasError && (
+        <Skeleton className={className} style={style} />
+      )}
+      <img
+        ref={imgRef}
+        src={src}
+        alt={alt}
+        className={className}
+        style={{
+          ...style,
+          display: isLoaded ? 'block' : 'none'
+        }}
+        onLoad={() => {
+          setIsLoaded(true);
+          if (onLoad) onLoad();
+        }}
+        onError={() => {
+          setHasError(true);
+          if (onError) onError();
+        }}
+      />
+      {hasError && (
+        <div 
+          className={className} 
+          style={{
+            ...style,
+            backgroundColor: '#1e293b',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+          }}
+        >
+          <Text size="1" color="gray">Error</Text>
+        </div>
+      )}
+    </>
+  );
+});
+
+
 export function ChampionsIndex({ onChampionSelect }) {
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingIndex, setIsLoadingIndex] = useState(true);
@@ -178,11 +251,9 @@ export const SkinItem = memo(({ skin, champKey, asset, rarity }) => {
 });
 
 export function Champion({ champion, onBack }) {
-
   const champ = champions.find((c) => c.key === champion);
   const [champData, setChampData] = useState(null);
   const [champChromas, setChampChromas] = useState([]);
-
   const styles = {
 
     kASGrey: ["continuum_icon_attackspeed_grey.png", "Attack"],
@@ -206,48 +277,43 @@ export function Champion({ champion, onBack }) {
     kMixed: "yellow",
     kMagic: "purple",
   };
-
-
-
-
-
-
   useTitle(champ?.name);
   useEscapeTo("/");
 
-
   if (!champ) return navigate("/");
-
 
   const skins = championSkins(champ.id);
 
-
   useEffect(() => {
+    let isMounted = true;
     _champData(champ.id).then((data) => {
-      const defaultSkins = data.skins.filter((skin) => skin.isBase);
-      setChampData({
-        ...data,
-        defaultSkins,
-      });
+      if (isMounted && data) {
+        const defaultSkins = data.skins.filter((skin) => skin.isBase);
+        setChampData({
+          ...data,
+          defaultSkins,
+        });
+      }
     });
+    return () => {
+      setChampData(null); // Limpia datos al desmontar
+    };
   }, [champ.id]);
 
-
-
-
   useEffect(() => {
+    let isMounted = true;
     if (!champ.id) return;
-
     _champDataName(champ.id).then((champData) => {
-      if (!champData || !champData.skins) return;
+      if (!isMounted || !champData || !champData.skins) return;
       const allChromas = champData.skins
         .map(getChromasForSkin)
         .filter(Boolean)
         .flat();
-
-
       setChampChromas(allChromas);
     });
+    return () => {
+      setChampChromas([]); // Limpia chromas al desmontar
+    };
   }, [champ.id]);
 
   const capitalize = (str) => {
